@@ -2,556 +2,315 @@
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>Retro-Lite Bowl (Prototype)</title>
+  <title>Clemson vs Gamecocks Retro Bowl</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <style>
-    html,body { margin:0; height:100%; background:#111; color:#fff; font-family: monospace; }
-    #gameWrap { display:flex; gap:12px; padding:12px; align-items:flex-start; }
-    canvas { background:#006400; image-rendering: pixelated; border:4px solid #222; }
-    #ui { width:320px; }
-    .panel { background:#121212; padding:10px; margin-bottom:10px; border-radius:6px; border:1px solid #333; }
-    button { padding:8px 12px; margin:6px 6px 6px 0; background:#222; color:#fff; border:1px solid #444; cursor:pointer; }
-    .small { font-size:13px; opacity:0.9; }
-    #log { height:140px; overflow:auto; background:#0b0b0b; padding:6px; border-radius:4px; border:1px solid #222; font-size:12px; }
+    html, body { margin: 0; height: 100%; background: #111; color: #fff; font-family: monospace; }
+    #gameWrap { display: flex; flex-direction: column; align-items: center; padding: 12px; }
+    canvas { background: #006400; image-rendering: pixelated; border: 4px solid #222; }
+    #ui { margin-top: 12px; }
+    button { padding: 8px 12px; margin: 0 6px; background: #222; color: #fff; border: 1px solid #444; cursor: pointer; }
+    #log { height: 120px; overflow: auto; background: #0b0b0b; padding: 6px; border-radius: 4px; border: 1px solid #222; font-size: 12px; }
+    .small { font-size: 14px; opacity: 0.9; }
   </style>
 </head>
 <body>
   <div id="gameWrap">
-    <canvas id="field" width=640 height=360></canvas>
+    <canvas id="field" width="600" height="300"></canvas>
     <div id="ui">
-      <div class="panel">
-        <div id="scoreboard" class="small"></div>
-        <div id="gameinfo" class="small"></div>
+      <div><strong>Call a Play:</strong></div>
+      <div>
+        <button id="btnRun">Run</button>
+        <button id="btnPass">Pass</button>
       </div>
-
-      <div class="panel">
-        <div><strong>Call a Play</strong></div>
-        <div style="margin-top:8px;">
-          <button id="btnRun">Run</button>
-          <button id="btnPass">Pass</button>
-          <button id="btnFastFwd">Fast Fwd</button>
-        </div>
-        <div class="small" style="margin-top:8px;">Use arrow keys to move when controlling the carrier (on runs).</div>
-      </div>
-
-      <div class="panel">
-        <div><strong>Game Log</strong></div>
-        <div id="log"></div>
-      </div>
-
-      <div class="panel small">
-        Tip: This is a prototype. Expand with player rosters, animations, and play variety.
-      </div>
+      <div class="small" style="margin-top:8px;">Arrow keys to move on runs.</div>
+      <div style="margin-top:12px;"><strong>Game Log:</strong></div>
+      <div id="log"></div>
     </div>
   </div>
 
-<script>
-/*
-  Retro-Lite Bowl prototype
-  - Play-calling: Run or Pass
-  - Simple field, players, basic AI
-  - Run -> QB hands off to RB who tries to reach gap
-  - Pass -> QB throws toward chosen receiver
-  - Defenders chase the ball; collisions cause tackles
-  - Downs, yards-to-go, scoring
-  - Save simple season stats in localStorage
-*/
+  <script>
+  // --- Config
+  const config = { fieldWidth: 100, yardsToPixels: 5, playTime: 10, fps: 60 };
 
-// ---- Config
-const config = {
-  fieldWidthYds: 100,   // playable field length in yards
-  canvasWidth: 640,
-  canvasHeight: 360,
-  yardsToPixels: 4,     // scale: 1 yard = 4 px (affects visual size)
-  playTimeSeconds: 10,  // how long a play "simulates" before automatic end
-  fps: 60,
-};
+  const logEl = document.getElementById('log');
+  function log(msg) { logEl.innerHTML = `<div>${msg}</div>` + logEl.innerHTML; }
 
-// ---- Helpers
-const rand = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
-const clamp = (v,a,b)=> Math.max(a, Math.min(b,v));
-const now = ()=> performance.now();
+  // --- Team names and roster
+  const TEAM_HOME = "Clemson Tigers";
+  const TEAM_AWAY = "South Carolina Gamecocks";
+  const roster = {
+    home: {
+      QB: "Cade Klubnik",
+      RB: "Adam Randall",
+      WR1: "Chase Byrd",
+      WR2: "Sam Earle",
+      LB: "Barrett Carter",
+      CB: "Shelton Lewis"
+    },
+    away: {
+      QB: "Brandon Cunningham",
+      RB: "Rahsul Faison",
+      WR1: "Mazeo Bennett Jr.",
+      WR2: "LaNorris Sellers",
+      LB: "Fred “JayR” Johnson",
+      CB: "DQ Smith"
+    }
+  };
 
-// ---- Game state
-let G = {
-  down: 1,
-  toGo: 10,
-  ballYard: 25,   // yardline (0 = defense goal, 100 = offense goal)
-  possessionIsHome: true,
-  clockSec: 10*60, // short game for prototype (10 minutes)
-  home: { name: "HOME", score:0 },
-  away: { name: "AWAY", score:0 },
-  half: 1,
-  inPlay: false,
-  playStartTime: 0,
-  playEndRequested: false,
-  seasonStats: JSON.parse(localStorage.getItem('retro_season')||'{}')
-};
+  // --- Game State
+  let G = {
+    possession: 'home',
+    down: 1,
+    toGo: 10,
+    ballYard: 25,
+    clock: 10*60,
+    score: { home: 0, away: 0 },
+    inPlay: false,
+    playType: null
+  };
 
-// ---- Canvas
-const canvas = document.getElementById('field');
-const ctx = canvas.getContext('2d');
+  // Entities
+  let players = [];
+  let ball = { x: 0, y: 0, carrier: null, moving: false, vx: 0, vy: 0 };
 
-// UI elements
-const logEl = document.getElementById('log');
-const scoreboardEl = document.getElementById('scoreboard');
-const gameinfoEl = document.getElementById('gameinfo');
-const btnRun = document.getElementById('btnRun');
-const btnPass = document.getElementById('btnPass');
-const btnFastFwd = document.getElementById('btnFastFwd');
+  const canvas = document.getElementById('field');
+  const ctx = canvas.getContext('2d');
+  const btnRun = document.getElementById('btnRun');
+  const btnPass = document.getElementById('btnPass');
 
-function log(s){
-  const t = new Date().toLocaleTimeString();
-  logEl.innerHTML = `<div>[${t}] ${s}</div>` + logEl.innerHTML;
-}
+  btnRun.onclick = ()=> callPlay('run');
+  btnPass.onclick = ()=> callPlay('pass');
 
-// ---- Players (simple moving dots)
-class Entity {
-  constructor(x,y,team,color,size=8){
-    this.x = x; this.y = y; this.vx = 0; this.vy=0;
-    this.team = team; this.color=color; this.size=size; this.speed = 60; // px/sec
-    this.cool = 0;
+  window.addEventListener('keydown', e => keys[e.key] = true);
+  window.addEventListener('keyup', e => keys[e.key] = false);
+  const keys = {};
+
+  function yardToX(y) {
+    const margin = 30;
+    const w = canvas.width - margin*2;
+    return margin + (y / config.fieldWidth) * w;
   }
-  step(dt){
-    this.x += this.vx*dt;
-    this.y += this.vy*dt;
-    if (this.cool>0) this.cool = Math.max(0, this.cool-dt);
+  function xToYard(x) {
+    const margin = 30;
+    const w = canvas.width - margin*2;
+    const rel = (x - margin) / w;
+    return rel * config.fieldWidth;
   }
-  draw(){
-    ctx.fillStyle = this.color;
-    ctx.fillRect(this.x-this.size/2, this.y-this.size/2, this.size, this.size);
+
+  class Entity {
+    constructor(x, y, team, color, size=10) {
+      this.x = x; this.y = y; this.vx = 0; this.vy = 0;
+      this.team = team; this.color = color; this.size = size; this.speed = 80;
+    }
+    step(dt) {
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+    }
+    draw() {
+      ctx.fillStyle = this.color;
+      ctx.fillRect(this.x - this.size/2, this.y - this.size/2, this.size, this.size);
+    }
   }
-}
 
-// ---- Field helpers
-function yardToX(yard){
-  // left edge is defense goal (0) -> right edge is offense goal (100)
-  // We want current possession to go rightward when HOME has possession (for simplicity)
-  // Map 0..100 to small margins inside canvas
-  const margin = 40;
-  const width = canvas.width - margin*2;
-  return margin + (yard/100)*width;
-}
-function drawField(){
-  // green background already set
-  // draw yard lines every 10 yards
-  const marginTop = 20;
-  const marginBottom = 20;
-  ctx.fillStyle = '#0a5';
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-  ctx.strokeStyle = '#2e8b57';
-  for(let y=0;y<=10;y++){
-    const x = yardToX(y*10);
-    ctx.beginPath();
-    ctx.moveTo(x, marginTop);
-    ctx.lineTo(x, canvas.height-marginBottom);
-    ctx.stroke();
-  }
-  // endzones
-  ctx.fillStyle = '#005';
-  ctx.fillRect(0, marginTop, 40, canvas.height-marginTop-marginBottom);
-  ctx.fillRect(canvas.width-40, marginTop, 40, canvas.height-marginTop-marginBottom);
-  // center line top/bottom
-  ctx.fillStyle = '#0008';
-  ctx.fillRect(0, marginTop-2, canvas.width, 3);
-  ctx.fillRect(0, canvas.height-marginBottom-1, canvas.width, 3);
-}
+  function resetPlayers() {
+    players = [];
+    const midY = canvas.height / 2;
+    const baseX = yardToX(G.ballYard);
+    // Home offense: orange, away: garnet
 
-// ---- Game Entities
-let players = []; // defenders & offense
-let ball = { x:0, y:0, carrier: null, moving:false, vx:0, vy:0 }; // if moving=true it's a pass/picked ball
+    // Home QB
+    players.push({ role: 'QB', team: 'home', ent: new Entity(baseX - 40, midY, 'home', 'orange') });
+    // Home RB
+    players.push({ role: 'RB', team: 'home', ent: new Entity(baseX - 60, midY + 30, 'home', 'yellow') });
+    // Home WRs
+    players.push({ role: 'WR1', team: 'home', ent: new Entity(baseX - 40, midY - 40, 'home', 'white') });
+    players.push({ role: 'WR2', team: 'home', ent: new Entity(baseX - 40, midY + 40, 'home', 'white') });
 
-function resetPlayers(){
-  players = [];
-  // offense: QB, RB, 2 WRs
-  const midY = canvas.height/2;
-  const yardX = yardToX(G.ballYard);
-  const offenseBaseX = yardX - 30;
-  const defenseBaseX = yardX + 60;
-  // QB
-  players.push({role:'QB', team:'off', ent: new Entity(offenseBaseX, midY, 'off','#fff',8)});
-  // RB behind QB
-  players.push({role:'RB', team:'off', ent: new Entity(offenseBaseX-30, midY+25, 'off','#ff0',8)});
-  // WRs spread
-  players.push({role:'WR1', team:'off', ent: new Entity(offenseBaseX-10, midY-70, 'off','#0ff',8)});
-  players.push({role:'WR2', team:'off', ent: new Entity(offenseBaseX-10, midY+70, 'off','#0ff',8)});
-  // defenders (4)
-  players.push({role:'DL', team:'def', ent: new Entity(defenseBaseX, midY-20, 'def','#f55',10)});
-  players.push({role:'LB', team:'def', ent: new Entity(defenseBaseX+30, midY+20, 'def','#f55',9)});
-  players.push({role:'CB1', team:'def', ent: new Entity(defenseBaseX+10, midY-80, 'def','#f88',8)});
-  players.push({role:'CB2', team:'def', ent: new Entity(defenseBaseX+10, midY+80, 'def','#f88',8)});
-  // place ball at QB
-  const qb = players.find(p=>p.role==='QB').ent;
-  ball.carrier = qb;
-  ball.x = qb.x; ball.y = qb.y;
-  ball.moving=false;
-}
+    // Away defenders / offense
+    players.push({ role: 'QB', team: 'away', ent: new Entity(baseX + 40, midY, 'away', 'garnet') });
+    players.push({ role: 'RB', team: 'away', ent: new Entity(baseX + 60, midY + 30, 'away', 'pink') });
+    players.push({ role: 'WR1', team: 'away', ent: new Entity(baseX + 40, midY - 40, 'away', 'white') });
+    players.push({ role: 'WR2', team: 'away', ent: new Entity(baseX + 40, midY + 40, 'away', 'white') });
 
-// ---- Play logic
-let playType = null; // 'run' or 'pass'
-let playTimer = 0;
-let controlEnabled = false; // whether player can move carrier with arrows
+    // Simple defense: one LB and one CB each
+    players.push({ role: 'LB', team: 'away', ent: new Entity(baseX + 30, midY + 10, 'away', 'red') });
+    players.push({ role: 'CB', team: 'away', ent: new Entity(baseX + 30, midY - 10, 'away', 'red') });
 
-function callPlay(type){
-  if(G.inPlay) return;
-  playType = type;
-  G.inPlay = true;
-  G.playStartTime = performance.now();
-  playTimer = 0;
-  G.playEndRequested = false;
-  // reset players around new ball position
-  resetPlayers();
-  log(`Play called: ${type.toUpperCase()}`);
-  if(type==='run'){
-    // RB will become carrier; QB hands off immediately
-    const rb = players.find(p=>p.role==='RB').ent;
-    // set RB as carrier and give him forward velocity
-    ball.carrier = rb;
-    ball.moving = false;
-    rb.speed = 85;
-    controlEnabled = true; // allow arrow-key steering
-  } else {
-    // pass: QB keeps ball until throw
-    const qb = players.find(p=>p.role==='QB').ent;
+    // Place ball at QB of possession
+    const qb = players.find(p => p.team === G.possession && p.role === 'QB').ent;
     ball.carrier = qb;
+    ball.x = qb.x; ball.y = qb.y;
     ball.moving = false;
-    controlEnabled = false;
-    // defenders get chance to rush
-    players.filter(p=>p.team==='def').forEach(d=> d.ent.speed = 80 + rand(-10,10));
-    // after a short time, QB will throw automatically (simplified)
-    setTimeout(()=> performPass(), 700 + rand(0,400));
   }
-}
 
-function performPass(){
-  if(!G.inPlay || playType !== 'pass') return;
-  // choose a target receiver (WR1 or WR2) randomly with weighting
-  const r = Math.random() < 0.6 ? 'WR1' : 'WR2';
-  const target = players.find(p=>p.role===r).ent;
-  // simulate throw: set ball moving toward target with some error
-  const qb = players.find(p=>p.role==='QB').ent;
-  ball.x = qb.x; ball.y = qb.y;
-  ball.carrier = null;
-  ball.moving = true;
-  // compute vector
-  const error = rand(-15,15);
-  const tx = target.x + error;
-  const ty = target.y + rand(-8,8);
-  const dx = tx - ball.x;
-  const dy = ty - ball.y;
-  const dist = Math.hypot(dx,dy);
-  const speed = 380; // px/sec
-  ball.vx = (dx/dist)*speed;
-  ball.vy = (dy/dist)*speed;
-  log(`QB throws to ${r}`);
-}
-
-// ---- Simple AI: defenders chase ball or nearest offensive target
-function aiStep(dt){
-  const defs = players.filter(p=>p.team==='def').map(p=>p.ent);
-  const offs = players.filter(p=>p.team==='off').map(p=>p.ent);
-  defs.forEach(d=>{
-    // choose target: if ball has carrier, chase carrier; if ball moving, chase ball endpoint
-    let targetX = ball.x;
-    let targetY = ball.y;
-    if(ball.carrier) { targetX = ball.carrier.x; targetY = ball.carrier.y; }
-    // simple vector toward target
-    const dx = targetX - d.x;
-    const dy = targetY - d.y;
-    const dist = Math.max(1, Math.hypot(dx,dy));
-    const spd = d.speed + (Math.random()*10 -5);
-    d.vx = (dx/dist)*spd;
-    d.vy = (dy/dist)*spd;
-  });
-
-  // offensive receivers run routes (forward)
-  players.filter(p=>p.team==='off').forEach(p=>{
-    const e = p.ent;
-    if(p.role.startsWith('WR')){
-      // run forward (to the right)
-      e.vx = 40 + (p.role==='WR1'?10:0);
-      // slight vertical bob for interest
-      e.vy = Math.sin((performance.now()+e.x)*0.002)*6;
-    } else if(p.role==='RB' && ball.carrier !== e){
-      // RB can block or help; keep near line
-      e.vx = 10; e.vy = 0;
-    } else if(p.role==='QB' && ball.carrier===e){
-      e.vx = 0; e.vy = 0;
-    }
-  });
-}
-
-// ---- Collisions and tackle detection
-function detectTackles(){
-  if(ball.carrier){
-    // check defenders close to carrier
-    for(const d of players.filter(p=>p.team==='def').map(p=>p.ent)){
-      const dist = Math.hypot(d.x - ball.carrier.x, d.y - ball.carrier.y);
-      if(dist < 12){
-        // tackle -> end play
-        log('Tackle! Play ends.');
-        endPlay(ball.carrier.x);
-        return;
-      }
-    }
-    // check touchdown or out-of-bounds
-    // map x back to yard
-    const yard = xToYard(ball.carrier.x);
-    if(yard >= 100){
-      // TD for offense possession side
-      scoreTouchdown();
-      return;
-    } else if(yard <= 0){
-      // safety or defensive TD but we simply end
-      log('Ball reached defensive end - turnover.');
-      turnover();
-      return;
-    }
-  } else if(ball.moving){
-    // if moving, check if any receiver is close to catch
-    for(const p of players.filter(pp=>pp.team==='off')){
+  function aiStep(dt) {
+    players.forEach(p => {
       const e = p.ent;
-      const dist = Math.hypot(ball.x - e.x, ball.y - e.y);
-      if(dist < 14){
-        // catch probability based on distance and defender proximity
-        const nearestDef = players.filter(pp=>pp.team==='def').map(pp=>pp.ent).reduce((a,b)=> {
-          const da = Math.hypot(a.x-e.x,a.y-e.y);
-          const db = Math.hypot(b.x-e.x,b.y-e.y);
-          return da<db?a:b;
-        });
-        const defDist = Math.hypot(nearestDef.x - e.x, nearestDef.y - e.y);
-        const catchProb = clamp(0.6 + (20 - defDist)*0.02, 0.12, 0.95);
-        if(Math.random() < catchProb){
-          // caught -> become carrier
-          ball.carrier = e;
-          ball.moving = false;
-          log(`${p.role} caught the ball!`);
-          return;
+      if (p.team === 'away') {
+        // chase ball
+        const tx = ball.x;
+        const ty = ball.y;
+        const dx = tx - e.x, dy = ty - e.y;
+        const d = Math.hypot(dx, dy) || 1;
+        e.vx = (dx / d) * e.speed;
+        e.vy = (dy / d) * e.speed;
+      } else {
+        // offense WRs just run forward
+        if (p.role.startsWith('WR')) {
+          e.vx = 40;
         } else {
-          // incomplete
-          ball.moving = false;
-          log('Incomplete pass.');
-          endPlay(ball.x);
-          return;
+          e.vx = 0;
         }
       }
-    }
-    // if pass flies beyond field or time, ball falls incomplete
-    if(ball.x < 0 || ball.x > canvas.width){
-      ball.moving = false;
-      log('Incomplete pass (out).');
-      endPlay(ball.x);
-      return;
-    }
-  }
-}
-
-// ---- End play and update downs/possession
-function endPlay(px){
-  G.inPlay = false;
-  controlEnabled = false;
-  // map px -> yard
-  const yard = xToYard(px);
-  const gain = yard - G.ballYard;
-  // if offense was moving rightward (we assume increasing yard) then positive gain is good
-  log(`Play ended. Gain: ${Math.round(gain)} yards.`);
-  // update ball position & downs
-  G.ballYard = clamp(Math.round(yard), 0, 100);
-  // check TD already handled earlier
-  // update toGo and downs
-  if(gain >= G.toGo){
-    // first down
-    G.down = 1;
-    G.toGo = Math.min(100 - G.ballYard, 10);
-    log('First down!');
-  } else {
-    // advance downs
-    G.down += 1;
-    if(G.down > 4){
-      // turnover on downs
-      log('Turnover on downs!');
-      turnover();
-      return;
-    } else {
-      G.toGo = Math.max(1, G.toGo - Math.max(0,gain));
-    }
-  }
-  // small clock tick
-  G.clockSec = Math.max(0, G.clockSec - rand(8,20));
-  if(G.clockSec <= 0) {
-    quarterEnd();
-  }
-  // prepare next play: reset players at new yardline
-  resetPlayers();
-}
-
-function scoreTouchdown(){
-  // award TD to offense
-  const scoringTeam = G.possessionIsHome ? G.home : G.away;
-  scoringTeam.score += 6;
-  log(`${scoringTeam.name} TOUCHDOWN!`);
-  // reset ball to 25 for kickoff and switch possession
-  G.possessionIsHome = !G.possessionIsHome;
-  G.ballYard = 25;
-  G.down = 1;
-  G.toGo = 10;
-  G.inPlay = false;
-  // simple extra point attempt auto-success
-  scoringTeam.score += 1;
-  log('Extra point good (+1).');
-  // small clock update
-  G.clockSec = Math.max(0, G.clockSec - 30);
-  resetPlayers();
-}
-
-function turnover(){
-  // flip possession and give ball to other side at same yardline
-  G.possessionIsHome = !G.possessionIsHome;
-  G.down = 1;
-  G.toGo = 10;
-  G.inPlay = false;
-  // start from same yard but flipped field perspective: if we were at yard X for offense, other team has (100 - X)
-  G.ballYard = 100 - G.ballYard;
-  resetPlayers();
-}
-
-function quarterEnd(){
-  // handle halftime or end of game
-  if(G.half === 1){
-    G.half = 2;
-    G.clockSec = 10*60; // reset for second half
-    log('Halftime. Second half starts.');
-  } else {
-    // end of game
-    log('Game over!');
-    G.inPlay = false;
-    // persist simple stats
-    const season = G.seasonStats || {};
-    season.lastGame = { home:G.home.score, away:G.away.score, date:new Date().toISOString() };
-    localStorage.setItem('retro_season', JSON.stringify(season));
-  }
-}
-
-// ---- Utility: px -> yard
-function xToYard(px){
-  // invert yardToX
-  const margin = 40;
-  const width = canvas.width - margin*2;
-  let rel = (px - margin)/width;
-  rel = clamp(rel, 0, 1);
-  return rel*100;
-}
-
-// ---- Input handling (arrow keys to move carrier on runs)
-const keys = {};
-window.addEventListener('keydown', e=>{
-  keys[e.key] = true;
-  // fast fwd key: Space
-  if(e.key === ' ') {
-    e.preventDefault();
-    btnFastFwd.click();
-  }
-});
-window.addEventListener('keyup', e=> keys[e.key] = false);
-
-btnRun.onclick = ()=> callPlay('run');
-btnPass.onclick = ()=> callPlay('pass');
-btnFastFwd.onclick = ()=> {
-  // If play in progress, speed it up by reducing playTime
-  if(G.inPlay) G.playEndRequested = true;
-};
-
-// ---- Main loop
-let lastT = performance.now();
-resetPlayers();
-function tick(){
-  const t = performance.now();
-  const dt = (t - lastT)/1000;
-  lastT = t;
-  // update play timer & clock
-  if(G.inPlay){
-    playTimer += dt;
-    // perform AI
-    aiStep(dt);
-    // step entities
-    players.forEach(p=>{
-      p.ent.step(dt);
     });
-    // ball movement if thrown
-    if(ball.moving){
-      ball.x += ball.vx*dt;
-      ball.y += ball.vy*dt;
-    } else if(ball.carrier){
-      ball.x = ball.carrier.x;
-      ball.y = ball.carrier.y;
-    }
+  }
 
-    // if player is controlling the RB, allow movement
-    if(controlEnabled && playType==='run' && ball.carrier){
-      const e = ball.carrier;
-      const moveSpeed = e.speed;
-      let dx = 0, dy = 0;
-      if(keys['ArrowUp']) dy -= 1;
-      if(keys['ArrowDown']) dy += 1;
-      if(keys['ArrowLeft']) dx -= 1;
-      if(keys['ArrowRight']) dx += 1;
-      if(dx !==0 || dy !==0){
-        const len = Math.hypot(dx,dy) || 1;
-        e.vx = (dx/len) * moveSpeed;
-        e.vy = (dy/len) * moveSpeed;
-      } else {
-        e.vx = moveSpeed*0.35; // forward default push
-        e.vy = 0;
+  function detectTackle() {
+    if (ball.carrier) {
+      const c = ball.carrier;
+      players.filter(p => p.team !== G.possession).forEach(d => {
+        const e = d.ent;
+        if (Math.hypot(e.x - c.x, e.y - c.y) < 12) {
+          log("Tackle by " + d.role + "!");
+          endPlay();
+        }
+      });
+      // touchdown
+      const yard = xToYard(c.x);
+      if (yard >= config.fieldWidth) {
+        log("Touchdown " + (G.possession === 'home' ? TEAM_HOME : TEAM_AWAY) + "!");
+        scoreTD();
       }
     }
+  }
 
-    // allow defenders and receivers to keep moving via their ent.vx set earlier
-    players.forEach(p=> {
-      // friction
-      p.ent.vx *= 0.98;
-      p.ent.vy *= 0.98;
-    });
-
-    detectTackles();
-
-    // forced end if play timer exceeds threshold or fast forward requested
-    if(playTimer > config.playTimeSeconds || G.playEndRequested){
-      // resolve if ball carrier exists -> end play at current position
-      endPlay(ball.x);
+  function callPlay(type) {
+    if (G.inPlay) return;
+    G.inPlay = true;
+    G.playType = type;
+    resetPlayers();
+    log("Play: " + type.toUpperCase());
+    if (type === 'run') {
+      const rb = players.find(p => p.role === 'RB' && p.team === G.possession).ent;
+      ball.carrier = rb;
+    } else {
+      // pass: after delay, throw to a WR
+      setTimeout(() => {
+        const wrs = players.filter(p => p.role.startsWith('WR') && p.team === G.possession);
+        const target = wrs[Math.floor(Math.random() * wrs.length)].ent;
+        ball.carrier = null;
+        ball.moving = true;
+        const dx = target.x - ball.x;
+        const dy = target.y - ball.y;
+        const dist = Math.hypot(dx, dy);
+        ball.vx = (dx / dist) * 300;
+        ball.vy = (dy / dist) * 300;
+        log("Pass thrown to " + target === wrs[0] ? roster[G.possession].WR1 : roster[G.possession].WR2);
+      }, 700);
     }
   }
 
-  // draw field
-  drawField();
+  function endPlay() {
+    G.inPlay = false;
+    // update ball yard
+    const yard = xToYard(ball.x);
+    const gain = yard - G.ballYard;
+    G.ballYard = Math.max(0, Math.min(config.fieldWidth, yard));
+    log("Gain: " + Math.round(gain) + " yards");
+    // simple downs logic
+    if (gain >= G.toGo) {
+      G.down = 1;
+      G.toGo = 10;
+      log("First down!");
+    } else {
+      G.down++;
+      if (G.down > 4) {
+        log("Turnover on downs!");
+        turnover();
+        return;
+      } else {
+        G.toGo = Math.max(1, G.toGo - gain);
+      }
+    }
+    // switch possession randomly for demo
+    G.possession = G.possession === 'home' ? 'away' : 'home';
+    resetPlayers();
+  }
 
-  // draw yard marker for current ball yard
-  ctx.fillStyle = '#fff';
-  const yardX = yardToX(G.ballYard);
-  ctx.fillRect(yardX-1, 0, 2, canvas.height);
+  function scoreTD() {
+    G.score[G.possession] += 6;
+    G.inPlay = false;
+    log("Extra point good!");
+    G.score[G.possession] += 1;
+    G.possession = G.possession === 'home' ? 'away' : 'home';
+    G.ballYard = 25;
+    resetPlayers();
+  }
 
-  // draw players
-  players.forEach(p=> {
-    p.ent.draw();
-  });
-  // draw ball
-  ctx.fillStyle = '#ffb';
-  ctx.beginPath();
-  ctx.arc(ball.x, ball.y-10, 6, 0, Math.PI*2);
-  ctx.fill();
+  function turnover() {
+    G.possession = G.possession === 'home' ? 'away' : 'home';
+    G.down = 1;
+    G.toGo = 10;
+    G.ballYard = 100 - G.ballYard;
+    resetPlayers();
+  }
 
-  // scoreboard UI
-  scoreboardEl.innerHTML = `${G.home.name} ${G.home.score} - ${G.away.score} ${G.away.name}`;
-  const minutes = Math.floor(G.clockSec/60);
-  const seconds = Math.floor(G.clockSec%60).toString().padStart(2,'0');
-  gameinfoEl.innerHTML = `Half: ${G.half} | Clock: ${minutes}:${seconds} | Down: ${G.down} &nbsp; ToGo: ${G.toGo} | Ball: ${G.ballYard}yd`;
+  let last = performance.now();
+  function tick() {
+    const now = performance.now();
+    const dt = (now - last) / 1000;
+    last = now;
 
-  // loop
-  requestAnimationFrame(tick);
-}
-requestAnimationFrame(tick);
+    if (G.inPlay) {
+      aiStep(dt);
+      players.forEach(p => p.ent.step(dt));
+      if (ball.moving) {
+        ball.x += ball.vx * dt;
+        ball.y += ball.vy * dt;
+      } else if (ball.carrier) {
+        ball.x = ball.carrier.x;
+        ball.y = ball.carrier.y;
+      }
+      detectTackle();
+    }
 
-// initial instructions
-log('Welcome to Retro-Lite Bowl prototype. Call Run or Pass to start a play.');
+    // draw
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // field lines
+    ctx.strokeStyle = "#2e8b57";
+    for (let i = 0; i <= config.fieldWidth; i += 10) {
+      const x = yardToX(i);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, canvas.height);
+      ctx.stroke();
+    }
+    // draw players
+    players.forEach(p => p.ent.draw());
+    // draw ball
+    if (ball.carrier || ball.moving) {
+      ctx.fillStyle = "orange";
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
-</script>
+    // draw scoreboard
+    ctx.fillStyle = "white";
+    ctx.font = "16px monospace";
+    ctx.fillText(`${TEAM_HOME}: ${G.score.home}`, 10, 20);
+    ctx.fillText(`${TEAM_AWAY}: ${G.score.away}`, 10, 40);
+    ctx.fillText(`Down: ${G.down}  ToGo: ${Math.round(G.toGo)}`, 10, 60);
+    ctx.fillText(`Ball at: ${Math.round(G.ballYard)}`, 10, 80);
+
+    requestAnimationFrame(tick);
+  }
+
+  resetPlayers();
+  tick();
+
+  log("Welcome to " + TEAM_HOME + " vs " + TEAM_AWAY + " retro game!");
+  </script>
 </body>
 </html>
